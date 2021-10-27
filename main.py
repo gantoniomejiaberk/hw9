@@ -17,6 +17,14 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
+import tensorflow as tf
+import datetime
+
+current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+train_log_dir = 'logs/timing/' + current_time + '/train'
+val_log_dir = 'logs/timing/' + current_time + '/val'
+train_summary_writer = tf.summary.create_file_writer(train_log_dir)
+val_summary_writer = tf.summary.create_file_writer(val_log_dir)
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -213,6 +221,7 @@ def main_worker(gpu, ngpus_per_node, args):
             normalize,
         ]))
 
+
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
@@ -236,13 +245,17 @@ def main_worker(gpu, ngpus_per_node, args):
         validate(val_loader, model, criterion, args)
         return
 
+    start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
         adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, args)
+        with train_summary_writer.as_default():
+            acc1_train = train(train_loader, model, criterion, optimizer, epoch, args)
+            epoch_time = time.time() - start_time
+            tf.summary.scalar('epoch_time(s)', epoch_time, step=epoch+1)
 
         # evaluate on validation set
         acc1 = validate(val_loader, model, criterion, args)
@@ -260,6 +273,9 @@ def main_worker(gpu, ngpus_per_node, args):
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict(),
             }, is_best)
+            with train_summary_writer.as_default():
+                print(type(acc1))
+                tf.summary.scalar('acc1', acc1.cpu(), step=epoch+1)
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
@@ -277,7 +293,10 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     model.train()
 
     end = time.time()
+    nsamples = 10
     for i, (images, target) in enumerate(train_loader):
+        #if i > nsamples:
+        #    break
         # measure data loading time
         data_time.update(time.time() - end)
 
@@ -307,7 +326,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
         if i % args.print_freq == 0:
             progress.display(i)
-
+    return acc1[0]
 
 def validate(val_loader, model, criterion, args):
     batch_time = AverageMeter('Time', ':6.3f')
@@ -324,7 +343,10 @@ def validate(val_loader, model, criterion, args):
 
     with torch.no_grad():
         end = time.time()
+        nsamples = 10
         for i, (images, target) in enumerate(val_loader):
+            #if i > nsamples:
+            #    break
             if args.gpu is not None:
                 images = images.cuda(args.gpu, non_blocking=True)
             if torch.cuda.is_available():
